@@ -1,6 +1,6 @@
 {
   "name": "@pratikgajjar/pi-mcp-events",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "pi extension: MCP Events (SEP-3415) for the MCP servers in pi's mcp.json. An event wakes the pi session.",
   "type": "module",
   "license": "MIT",

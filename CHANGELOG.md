@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2]
+
+- Fixed Pi startup failing with `session slots full` after many sessions. State, lock files and slots are now created only on the first subscription or when the session has saved state. Close removes its lock file and empty state.
+- State, slot, quota, lock and corrupt-state errors no longer break startup. They show a warning and fail the affected subscriptions.
+- Slots count only live owners, pending pages and runtime subscriptions. Stale lock files, including 0.1.1 leftovers, are removed when no owner holds them. When slots fill, the oldest cursor-only state of closed sessions is evicted; pending pages never are.
+- Added a TLA+ model of the lock-file lifecycle with code-mutation replays.
+
 ## [0.1.1]
 
 - Added per-session durable outboxes. Cleanup requires exact, fsynced Pi transcript receipts; crashes may replay duplicates.

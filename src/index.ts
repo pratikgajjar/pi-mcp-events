@@ -1,13 +1,13 @@
 // pi-mcp-events: MCP Events (SEP-3415) for the MCP servers configured in pi.
 // An event from a subscribed server becomes a custom message that wakes the session.
 
-import { appendFileSync, readFileSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { loadServers, loadSubscriptions, type SubscriptionSpec, subscriptionKey, unsupportedReason } from "./config.ts";
-import { identity, StateStore } from "./state.ts";
+import { cleanStaleLocks, identity, type IntentSource, StateStore } from "./state.ts";
 import { persistedReceipts } from "./receipt.ts";
 import { type EventOccurrence, ServerPool, Subscription } from "./subscription.ts";
 
@@ -47,6 +47,7 @@ export default function piMcpEvents(pi: ExtensionAPI) {
 	let ctx: ExtensionContext | undefined;
 	let pool: ServerPool | undefined;
 	let state: StateStore | undefined;
+	let statePath = "";
 	let logPath = "";
 	const subs = new Map<string, Subscription>();
 	let tick: ReturnType<typeof setInterval> | undefined;
@@ -54,6 +55,7 @@ export default function piMcpEvents(pi: ExtensionAPI) {
 	let running = false;
 	let lastFailure = "";
 	let configRevision = 0;
+	const intents = () => state?.intents ?? [];
 	const stateKey = (spec: SubscriptionSpec) => identity({ cwd: ctx!.cwd, server: pool!.connectionConfig(spec.server), spec: subscriptionKey(spec) });
 
 	const log = (line: string) => {
@@ -71,6 +73,20 @@ export default function piMcpEvents(pi: ExtensionAPI) {
 		if (subs.size === 0) return ctx.ui.setStatus("mcp-events", undefined);
 		const active = [...subs.values()].filter((s) => s.status === "active").length;
 		ctx.ui.setStatus("mcp-events", `events ${active}/${subs.size}`);
+	};
+
+	const warn = (line: string) => {
+		log(line);
+		if (ctx?.hasUI) ctx.ui.notify(`mcp-events: ${line}`, "warning");
+	};
+
+	/** Lazy: no state file, lock or slot until this session subscribes or already has state. */
+	const openState = (): StateStore => {
+		if (state) return state;
+		const store = new StateStore(statePath);
+		for (const name of store.evicted) log(`state: evicted cursor-only state ${name} of a closed session to free a slot`);
+		state = store;
+		return store;
 	};
 
 	const pump = () => {
@@ -95,17 +111,19 @@ export default function piMcpEvents(pi: ExtensionAPI) {
 	};
 	const deliver = () => pump();
 
-	const subscribe = (spec: SubscriptionSpec, source: "config" | "runtime"): Subscription => {
+	const subscribe = (spec: SubscriptionSpec, source: IntentSource): Subscription => {
 		const key = stateKey(spec);
 		const existing = subs.get(key);
 		if (existing && existing.status !== "failed") return existing;
+		// Slot, quota, lock and corrupt-state errors fail this subscription, not the session.
+		const store = openState();
 		existing?.stop();
 		const onEnd = (err: Error) => {
 			// Tell the user, not the model: no turn starts for this.
 			if (ctx?.hasUI) ctx.ui.notify(`mcp-events: ${spec.server}/${spec.event} ended: ${err.message}`, "warning");
 		};
-		state!.setIntent(key, spec, true);
-		const sub = new Subscription({ spec, key, source, pool: pool!, state: state!, deliver, log, onChange: updateStatus, onEnd });
+		store.setIntent(key, spec, true, source);
+		const sub = new Subscription({ spec, key, source, pool: pool!, state: store, deliver, log, onChange: updateStatus, onEnd });
 		subs.set(key, sub);
 		log(`[${sub.label}] subscribe (${source})`);
 		sub.start();
@@ -127,7 +145,7 @@ export default function piMcpEvents(pi: ExtensionAPI) {
 	};
 
 	const reloadServers = async () => {
-		if (!ctx || !pool || !state || !running) return;
+		if (!ctx || !pool || !running) return;
 		const revision = ++configRevision;
 		const { servers, errors } = loadServers({
 			agentDir: getAgentDir(),
@@ -136,7 +154,8 @@ export default function piMcpEvents(pi: ExtensionAPI) {
 			registered: pi.getMcpServers(),
 		});
 		// Retire old connections before installing changed endpoint/auth/enable settings.
-		const old = state.intents.map(([key, spec]) => ({ spec, key, source: subs.get(key)?.source ?? "runtime" as const }));
+		// Config intents come back from mcp-events.json at start; runtime intents come back from state.
+		const old = intents().filter((i) => subs.has(i.key) || i.source === "runtime").map((i) => ({ ...i, source: subs.get(i.key)?.source ?? i.source }));
 		for (const sub of subs.values()) sub.stop();
 		subs.clear();
 		updateStatus();
@@ -159,8 +178,16 @@ export default function piMcpEvents(pi: ExtensionAPI) {
 		logPath = join(agentDir, "mcp-events.log");
 		running = true;
 		inFlight = undefined;
-		state = new StateStore(join(agentDir, "mcp-events", `${identity({ session: c.sessionManager.getSessionId(), file: c.sessionManager.getSessionFile() ?? null })}.json`));
+		state?.close(); state = undefined;
+		const root = join(agentDir, "mcp-events");
+		statePath = join(root, `${identity({ session: c.sessionManager.getSessionId(), file: c.sessionManager.getSessionFile() ?? null })}.json`);
 		pool = new ServerPool(new Map(), { cwd: c.cwd, version: VERSION, log });
+		try {
+			const removed = cleanStaleLocks(root);
+			if (removed) log(`state: removed ${removed} stale lock file(s)`);
+		} catch (err) { log(`state: stale lock cleanup skipped: ${String(err)}`); }
+		// Startup never fails on state errors. Subscriptions that need the state fail visibly instead.
+		if (existsSync(statePath)) try { openState(); } catch (err) { warn(`state: ${err instanceof Error ? err.message : String(err)}`); }
 		await reloadServers();
 		if (!running) return;
 		const { subscriptions, errors } = loadSubscriptions(agentDir);
@@ -168,11 +195,11 @@ export default function piMcpEvents(pi: ExtensionAPI) {
 			log(`config: ${e}`);
 			if (c.hasUI) c.ui.notify(`mcp-events: ${e}`, "warning");
 		}
-		for (const [key, spec] of state.intents) {
-			try { if (stateKey(spec) === key) subscribe(spec, "runtime"); } catch (err) { log(`restore: ${String(err)}`); }
+		for (const { key, spec, source } of intents()) {
+			try { if (source === "runtime" && stateKey(spec) === key) subscribe(spec, "runtime"); } catch (err) { warn(`restore ${spec.server}/${spec.event}: ${err instanceof Error ? err.message : String(err)}`); }
 		}
 		for (const spec of subscriptions) {
-			try { subscribe(spec, "config"); } catch (err) { log(`config: ${String(err)}`); if (c.hasUI) c.ui.notify(`mcp-events: ${String(err)}`, "warning"); }
+			try { subscribe(spec, "config"); } catch (err) { warn(`config ${spec.server}/${spec.event}: ${err instanceof Error ? err.message : String(err)}`); }
 		}
 		tick = setInterval(pump, 250);
 		tick.unref();
@@ -188,6 +215,7 @@ export default function piMcpEvents(pi: ExtensionAPI) {
 		for (const sub of subs.values()) sub.stop();
 		subs.clear();
 		try { await pool?.closeAll(); state?.flush(); }
+		catch (err) { log(`shutdown: ${String(err)}`); }
 		finally {
 			state?.close(); state = undefined;
 			if (ctx?.hasUI) ctx.ui.setStatus("mcp-events", undefined);

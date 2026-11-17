@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { formatEvents, formatPages } from "../src/format.ts";
 import { persistedReceipts } from "../src/receipt.ts";
-import { identity, limits, StateStore } from "../src/state.ts";
+import { cleanStaleLocks, identity, limits, StateStore } from "../src/state.ts";
 const spec = { server: "fixture", event: "changed", arguments: {} };
 const event = (id: string) => ({ eventId: id, name: "changed", data: { id } });
 function setup(t: TestContext) {
@@ -118,6 +119,63 @@ test("receipt requires exact complete disk entry, matching session, and not just
 test("corrupt state fails closed instead of discarding replay knowledge", (t) => {
 	const { state, path } = setup(t); state.close(); writeFileSync(path, "not JSON");
 	assert.throws(() => new StateStore(path)); assert.equal(readFileSync(path, "utf8"), "not JSON");
+});
+
+const snapshot = (subscriptions: object, pending: object[] = []) => JSON.stringify({ version: 2, subscriptions, pending });
+const lockFiles = (dir: string) => readdirSync(dir).filter((f) => f.endsWith(".lock") || f.endsWith("-journal"));
+
+test("close removes the lock and empty state; kept state needs pending, runtime intent or config cursor", (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "pme-close-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const run = (name: string, fn: (s: StateStore) => void) => { const s = new StateStore(join(dir, `${name}.json`)); fn(s); s.close(); return existsSync(join(dir, `${name}.json`)); };
+	assert.equal(run("untouched", () => {}), false);
+	assert.equal(run("unsubscribed", (s) => { s.setIntent("k", spec, true, "runtime"); s.accept("k", spec, [], false, "c1"); s.setIntent("k", spec, false); }), false);
+	assert.equal(run("config-no-cursor", (s) => s.setIntent("k", spec, true, "config")), false);
+	assert.equal(run("config-cursor", (s) => { s.setIntent("k", spec, true, "config"); s.accept("k", spec, [], false, "c1"); }), true);
+	assert.equal(run("runtime", (s) => s.setIntent("k", spec, true, "runtime")), true);
+	assert.equal(run("pending", (s) => { s.accept("k", spec, [event("one")], false, "c1"); }), true);
+	assert.deepEqual(lockFiles(dir), []);
+	const reopened = new StateStore(join(dir, "runtime.json"));
+	try { assert.deepEqual(reopened.intents.map((i) => i.source), ["runtime"]); reopened.setIntent("k", spec, true, "config"); assert.equal(reopened.intents[0].source, "runtime"); }
+	finally { reopened.close(); }
+});
+
+test("stale lock cleanup spares a live owner", (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "pme-stale-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const live = new StateStore(join(dir, "live.json"));
+	t.after(() => live.close());
+	for (const name of ["old-1", "old-2", "old-3"]) { const db = new DatabaseSync(join(dir, `${name}.json.lock`)); db.exec("BEGIN EXCLUSIVE"); db.close(); }
+	writeFileSync(join(dir, "old-3.json.lock-journal"), ""); writeFileSync(join(dir, "gone.json.lock-journal"), "");
+	assert.equal(cleanStaleLocks(dir), 3);
+	assert.deepEqual(lockFiles(dir), ["live.json.lock", "live.json.lock-journal"]);
+	assert.throws(() => new StateStore(join(dir, "live.json")), /busy/);
+});
+
+test("slot sweep evicts oldest cursor-only state, never pending or runtime intents", (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "pme-slots-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const entry = (source: string, cursor: string | null) => ({ k: { cursor, seen: [], spec, active: true, source } });
+	writeFileSync(join(dir, "pending.json"), snapshot({}, [{ id: "p", key: "k", server: "fixture", event: "changed", content: "page" }]));
+	writeFileSync(join(dir, "runtime.json"), snapshot(entry("runtime", "c")));
+	writeFileSync(join(dir, "old-cursor.json"), snapshot(entry("config", "c")));
+	writeFileSync(join(dir, "new-cursor.json"), snapshot(entry("config", "c")));
+	writeFileSync(join(dir, "empty.json"), snapshot({}));
+	const db = new DatabaseSync(join(dir, "leftover.json.lock")); db.exec("BEGIN EXCLUSIVE"); db.close();
+	utimesSync(join(dir, "old-cursor.json"), 1, 1);
+	const files = limits.files, free = limits.freeAfterSweep;
+	limits.files = 4; limits.freeAfterSweep = 1;
+	try {
+		const admitted = new StateStore(join(dir, "new.json"));
+		admitted.close();
+		assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".json")).sort(), ["new-cursor.json", "pending.json", "runtime.json"]);
+		assert.deepEqual(admitted.evicted, ["old-cursor"]);
+		assert.deepEqual(lockFiles(dir), []);
+		limits.files = 2;
+		assert.throws(() => new StateStore(join(dir, "refused.json")), /slots full: 2 sessions/);
+		assert(existsSync(join(dir, "pending.json")) && existsSync(join(dir, "runtime.json")));
+		assert.deepEqual(lockFiles(dir), []);
+	} finally { limits.files = files; limits.freeAfterSweep = free; }
 });
 
 test("summarize shows top-level fields on one line", async () => {

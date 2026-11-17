@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { fork, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { fork, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -36,7 +37,7 @@ async function fixture(t: TestContext, mode: "push" | "poll") {
 		if (msg.method === "events/poll") return reply({ events: msg.params.cursor ? [] : events, cursor: "c11", nextPollMs: 1000 });
 		if (msg.method === "events/stream") {
 			res.writeHead(200, { "content-type": "text/event-stream" }); streams.push({ res, id: msg.id });
-			note(res, msg.id, "active", { cursor: msg.params.cursor ?? null });
+			note(res, msg.id, "active", { cursor: msg.params.cursor ?? (msg.params.name === "keeper" ? "keeper-0" : null) });
 			if (!msg.params.cursor && msg.params.name !== "keeper") for (const e of events) note(res, msg.id, "event", e);
 			return;
 		}
@@ -64,10 +65,13 @@ async function fixture(t: TestContext, mode: "push" | "poll") {
 		assert.equal(child.exitCode, null, stderr);
 		let id = 0;
 		return { child, messages, ready: messages.find((m) => m.type === "ready"),
-			async command(action: string, params?: unknown) { const n = ++id; child.send({ id: n, action, params }); await waitFor(() => messages.some((m) => m.id === n), 15000); const result = messages.find((m) => m.id === n); assert(!result.error, result.error + stderr); return result; } };
+			async request(action: string, params?: unknown) { const n = ++id; child.send({ id: n, action, params }); await waitFor(() => messages.some((m) => m.id === n), 15000); return messages.find((m) => m.id === n); },
+			async command(action: string, params?: unknown) { const result = await this.request(action, params); assert(!result.error, result.error + stderr); return result; } };
 	};
+	const root = join(dir, "mcp-events");
+	const files = (suffix: string) => existsSync(root) ? readdirSync(root).filter((f) => f.endsWith(suffix)).sort() : [];
 	const snapshots = () => readdirSync(join(dir, "mcp-events")).filter((f) => f.endsWith(".json")).map((f) => JSON.parse(readFileSync(join(dir, "mcp-events", f), "utf8")));
-	return { dir, url, requests, modelRequests, start, snapshots, block: (method: string) => { blockedMethod = method; }, releaseStartup: () => { blockedMethod = ""; for (const resolve of startupWaiters.splice(0)) resolve(); }, release: () => { hold = false; for (const res of held.splice(0)) complete(res); }, note, streams };
+	return { dir, url, root, files, requests, modelRequests, start, snapshots, block: (method: string) => { blockedMethod = method; }, releaseStartup: () => { blockedMethod = ""; for (const resolve of startupWaiters.splice(0)) resolve(); }, release: () => { hold = false; for (const res of held.splice(0)) complete(res); }, note, streams };
 }
 
 for (const mode of ["push", "poll"] as const) {
@@ -182,3 +186,81 @@ for (const boundary of ["initialize", "events/list"]) {
 		await a.command("shutdown");
 	});
 }
+
+const keeper = { server: "fixture", event: "keeper" };
+const noExtensionErrors = (w: { messages: any[] }) => assert(!w.messages.some((m) => m.type === "extension_error"), JSON.stringify(w.messages));
+
+test("real Pi empty sessions leave no lock or state; closed sessions keep only needed state", { timeout: 60000 }, async (t) => {
+	const f = await fixture(t, "push");
+	const workers = await Promise.all([f.start(), f.start(), f.start(), f.start()]);
+	await Promise.all(workers.map(async (w) => { await w.command("reload"); for (let i = 0; i < 4; i++) await w.command("new"); }));
+	assert(!existsSync(f.root), "no state directory without subscriptions");
+	const a = workers[0];
+	await a.command("subscribe", keeper);
+	assert.equal(f.files(".json").length, 1); assert.equal(f.files(".json.lock").length, 1);
+	await a.command("unsubscribe", keeper); await a.command("new");
+	assert.deepEqual([...f.files(".json"), ...f.files(".lock")], [], "unsubscribed session leaves nothing");
+	await a.command("subscribe", keeper); await a.command("new");
+	assert.equal(f.files(".json").length, 1, "runtime intent survives close"); assert.deepEqual(f.files(".lock"), []);
+	// A global subscription gives each session cursor-only state; closing removes only the lock.
+	writeFileSync(join(f.dir, "mcp-events.json"), JSON.stringify({ subscriptions: [keeper] }));
+	for (let i = 0; i < 3; i++) {
+		await a.command("new");
+		await waitFor(() => f.snapshots().filter((s) => Object.values(s.subscriptions).some((e: any) => e.cursor === "keeper-0" && e.source === "config")).length === i + 1);
+	}
+	for (const w of workers) await w.command("shutdown");
+	assert.equal(f.files(".json").length, 4); assert.deepEqual(f.files(".lock"), []); assert.deepEqual(f.files("-journal"), []);
+	for (const w of workers) noExtensionErrors(w);
+});
+
+test("real Pi startup survives full slots, a busy owner and corrupt state; subscriptions fail visibly", { timeout: 60000 }, async (t) => {
+	const f = await fixture(t, "push"); f.release();
+	mkdirSync(f.root, { recursive: true, mode: 0o700 });
+	const held = { k: { cursor: "c", seen: [], spec: { server: "other", event: "changed", arguments: {} }, active: true, source: "runtime" } };
+	for (let i = 0; i < 1024; i++) writeFileSync(join(f.root, `held-${i}.json`), JSON.stringify({ version: 2, subscriptions: held, pending: [] }));
+	const a = await f.start();
+	assert.match((await a.request("subscribe", keeper)).error, /slots full: 1024 sessions/);
+	await a.command("list");
+	rmSync(join(f.root, "held-0.json"));
+	await a.command("prompt"); await waitFor(() => existsSync(a.ready.file) && readFileSync(a.ready.file, "utf8").includes('"role":"assistant"'));
+	await a.command("subscribe", keeper);
+	// The same session resumed elsewhere: the live owner excludes it, without breaking its startup.
+	const b = await f.start({ sessionFile: a.ready.file });
+	assert.equal(b.ready.id, a.ready.id);
+	assert.match((await b.request("subscribe", keeper)).error, /busy/);
+	await a.command("shutdown");
+	await b.command("subscribe", keeper);
+	assert.equal(f.files(".json.lock").length, 1);
+	await b.command("shutdown");
+	assert.deepEqual(f.files(".lock"), []);
+	const own = f.files(".json").filter((n) => !n.startsWith("held-"));
+	assert.equal(own.length, 1);
+	writeFileSync(join(f.root, own[0]), "not JSON");
+	const c = await f.start({ sessionFile: a.ready.file });
+	assert.match((await c.request("subscribe", keeper)).error, /JSON/);
+	await c.command("shutdown");
+	assert.equal(readFileSync(join(f.root, own[0]), "utf8"), "not JSON", "corrupt state is preserved");
+	assert.deepEqual(f.files(".lock"), []);
+	for (const w of [a, b, c]) noExtensionErrors(w);
+});
+
+test("real Pi removes 0.1.1 leftover locks only when no live owner holds them", { timeout: 30000 }, async (t) => {
+	const f = await fixture(t, "push");
+	mkdirSync(f.root, { recursive: true, mode: 0o700 });
+	for (let i = 0; i < 5; i++) { const db = new DatabaseSync(join(f.root, `old-${i}.json.lock`)); db.exec("BEGIN EXCLUSIVE"); db.close(); }
+	writeFileSync(join(f.root, "old-0.json.lock-journal"), "");
+	// An owner in another process, like a running 0.1.1 session.
+	const holder = spawn(process.execPath, ["-e", 'const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]); db.exec("BEGIN EXCLUSIVE"); console.log("locked"); setInterval(() => {}, 1e6);', join(f.root, "live.json.lock")], { stdio: ["ignore", "pipe", "inherit"] });
+	t.after(() => { if (holder.exitCode === null && holder.signalCode === null) holder.kill("SIGKILL"); });
+	let out = ""; holder.stdout!.on("data", (b) => { out += b; });
+	await waitFor(() => out.includes("locked"), 10000);
+	const a = await f.start();
+	await waitFor(() => f.files(".json.lock").length === 1);
+	assert.deepEqual(f.files(".json.lock"), ["live.json.lock"]);
+	holder.kill("SIGKILL"); await new Promise((r) => holder.once("exit", r));
+	await a.command("reload");
+	assert.deepEqual([...f.files(".lock"), ...f.files("-journal")], []);
+	assert.deepEqual(f.files(".json"), []);
+	await a.command("shutdown");
+	noExtensionErrors(a);
+});
