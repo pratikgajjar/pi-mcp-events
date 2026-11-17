@@ -1,0 +1,56 @@
+{
+  "name": "@pratikgajjar/pi-mcp-events",
+  "version": "0.1.0",
+  "description": "pi extension: MCP Events (SEP-3415) for the MCP servers in pi's mcp.json. An event wakes the pi session.",
+  "type": "module",
+  "license": "MIT",
+  "author": "pratikgajjar",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pratikgajjar/pi-mcp-events.git"
+  },
+  "homepage": "https://github.com/pratikgajjar/pi-mcp-events",
+  "bugs": {
+    "url": "https://github.com/pratikgajjar/pi-mcp-events/issues"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "mcp",
+    "model-context-protocol",
+    "mcp-events",
+    "sep-3415",
+    "events",
+    "ai-agent"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/pratikgajjar/pi-mcp-events/main/assets/demo.png"
+  },
+  "files": [
+    "src",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@types/node": "^26.6.6",
+    "typebox": "*",
+    "typescript": "^7.0.2"
+  }
+}
