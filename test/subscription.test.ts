@@ -51,7 +51,11 @@ function harness(handler: Handler, delivery: string[]) {
 
 const ev = (id: string) => ({ eventId: id, name: "ev", timestamp: "2026-01-01T00:00:00Z", data: { id } });
 
-test("poll: honors cursor and hasMore, dedupes by eventId, applies the nextPollMs floor", async () => {
+test("poll: honors cursor and hasMore, dedupes by eventId, applies the nextPollMs floor", async (tc) => {
+	// The hasMore gap includes an fsynced outbox write; a 20 ms floor is too tight under parallel test I/O.
+	const floor = timing.pollFloorMs;
+	timing.pollFloorMs = 250;
+	tc.after(() => { timing.pollFloorMs = floor; });
 	const polls: RpcMessage[] = [];
 	const times: number[] = [];
 	const h = harness((m, t) => {
