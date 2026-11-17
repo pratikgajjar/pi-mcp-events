@@ -1,6 +1,6 @@
 // Server connections and the poll / push loops of SEP-3415.
 
-import { expandHome, resolveCwd, resolveRecord, type ServerEntry, type SubscriptionSpec, subscriptionKey, unsupportedReason } from "./config.ts";
+import { expandHome, resolveCwd, resolveRecord, type ServerConfig, type ServerEntry, type SubscriptionSpec, subscriptionKey, unsupportedReason } from "./config.ts";
 import { CLIENT_CAPABILITIES, EVENTS_EXTENSION, HttpTransport, McpClient, OAuthRequiredError, RpcError, type RpcMessage, StdioTransport, SUBSCRIPTION_ID, type Transport } from "./rpc.ts";
 import type { StateStore } from "./state.ts";
 
@@ -58,6 +58,7 @@ export class ServerPool {
 	private readonly opts: PoolOptions;
 	private readonly clients = new Map<string, Promise<McpClient>>();
 	private readonly eventLists = new WeakMap<McpClient, Promise<EventDescriptor[]>>();
+	private readonly effective = new WeakMap<ServerEntry, ServerConfig>();
 
 	constructor(servers: Map<string, ServerEntry>, opts: PoolOptions) {
 		this.servers = servers;
@@ -85,7 +86,20 @@ export class ServerPool {
 		return entry;
 	}
 
+	/** Resolve secrets/commands once, so state identity describes the actual connection. */
+	connectionConfig(name: string): ServerConfig {
+		const entry = this.entry(name);
+		let config = this.effective.get(entry);
+		if (!config) {
+			config = { ...entry.config, headers: resolveRecord(entry.config.headers), env: resolveRecord(entry.config.env),
+				cwd: resolveCwd(this.opts.cwd, entry.config.cwd), command: entry.config.command && expandHome(entry.config.command), args: entry.config.args?.map(expandHome) };
+			this.effective.set(entry, config);
+		}
+		return config;
+	}
+
 	get(name: string): Promise<McpClient> {
+		this.entry(name);
 		const existing = this.clients.get(name);
 		if (existing) return existing;
 		const promise = this.connect(name);
@@ -133,13 +147,13 @@ export class ServerPool {
 	}
 
 	private defaultTransport(entry: ServerEntry): Transport {
-		const { config } = entry;
-		if (config.url) return new HttpTransport(config.url, resolveRecord(config.headers));
+		const config = this.connectionConfig(entry.name);
+		if (config.url) return new HttpTransport(config.url, config.headers ?? {});
 		return new StdioTransport({
-			command: expandHome(config.command!),
-			args: config.args?.map(expandHome),
-			env: resolveRecord(config.env),
-			cwd: resolveCwd(this.opts.cwd, config.cwd),
+			command: config.command!,
+			args: config.args,
+			env: config.env ?? {},
+			cwd: config.cwd!,
 		});
 	}
 
@@ -175,12 +189,11 @@ export class Subscription {
 	status: SubStatus = "starting";
 	mode?: "push" | "poll";
 	lastError?: string;
-	delivered = 0;
+	accepted = 0;
 	readonly ready: Promise<void>;
 	private markReady!: () => void;
 	private markFailed!: (err: Error) => void;
 	private stopped = false;
-	private gap = false;
 	private heartbeatMs?: number;
 	private cancelCurrent?: () => void;
 	private wake?: () => void;
@@ -195,6 +208,7 @@ export class Subscription {
 
 	constructor(opts: {
 		spec: SubscriptionSpec;
+		key?: string;
 		source: "config" | "runtime";
 		pool: ServerPool;
 		state: StateStore;
@@ -212,7 +226,7 @@ export class Subscription {
 		this.log = opts.log;
 		this.onChange = opts.onChange ?? (() => {});
 		this.onEnd = opts.onEnd ?? (() => {});
-		this.key = subscriptionKey(opts.spec);
+		this.key = opts.key ?? subscriptionKey(opts.spec);
 		this.ready = new Promise((resolve, reject) => {
 			this.markReady = resolve;
 			this.markFailed = reject;
@@ -231,6 +245,7 @@ export class Subscription {
 
 	stop(): void {
 		this.stopped = true;
+		this.markReady(); // release a subscribe tool waiting on cancelled startup
 		this.cancelCurrent?.();
 		this.wake?.();
 		this.setStatus("stopped");
@@ -249,7 +264,9 @@ export class Subscription {
 		while (!this.stopped) {
 			try {
 				const client = await this.pool.get(this.spec.server);
+				if (this.stopped) break;
 				if (!this.mode) this.mode = await this.chooseMode();
+				if (this.stopped) break;
 				if (this.mode === "push") await this.push(client);
 				else await this.poll(client);
 				failures = 0; // the server ended the stream cleanly: reconnect
@@ -310,13 +327,14 @@ export class Subscription {
 		return params;
 	}
 
-	private handle(events: EventOccurrence[]): void {
-		const fresh = events.filter((e) => e && typeof e.eventId === "string" && this.state.firstSeen(this.key, e.eventId));
-		if (fresh.length === 0) return;
-		this.delivered += fresh.length;
-		this.log(`[${this.label}] ${fresh.length} event(s): ${fresh.map((e) => e.eventId).join(", ")}`);
-		this.deliver(this, fresh, this.gap);
-		this.gap = false;
+	private handle(events: EventOccurrence[], cursor?: string | null, gap = false): void {
+		if (this.stopped) return;
+		const fresh = events.filter((e) => !this.state.hasSeen(this.key, e?.eventId));
+		const added = this.state.accept(this.key, this.spec, fresh, gap, cursor);
+		if (!added.length || this.stopped) return;
+		this.accepted += fresh.length;
+		this.log(`[${this.label}] saved ${fresh.length} event(s) in durable outbox`);
+		this.deliver(this, fresh, gap);
 		this.onChange();
 	}
 
@@ -324,9 +342,7 @@ export class Subscription {
 		while (!this.stopped && !client.closed) {
 			const res = await client.request("events/poll", this.requestParams());
 			if (this.stopped) return;
-			if (res?.truncated) this.gap = true;
-			this.handle(res?.events ?? []);
-			this.state.setCursor(this.key, res?.cursor);
+			this.handle(res?.events ?? [], res?.cursor, !!res?.truncated);
 			this.setStatus("active", "");
 			const next = typeof res?.nextPollMs === "number" ? res.nextPollMs : DEFAULT_POLL_MS;
 			const wait = res?.hasMore ? 0 : Math.max(timing.pollFloorMs, next);
@@ -336,10 +352,14 @@ export class Subscription {
 	}
 
 	private push(client: McpClient): Promise<void> {
+		if (this.stopped) return Promise.resolve();
 		return new Promise<void>((resolve, reject) => {
+			let ended = false;
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const call = client.start("events/stream", { ...this.requestParams(), heartbeatMs: timing.heartbeatMs }, { timeoutMs: 0 });
 			const finish = (err?: Error) => {
+				if (ended) return;
+				ended = true;
 				if (timer) clearTimeout(timer);
 				off();
 				this.cancelCurrent = undefined;
@@ -356,24 +376,23 @@ export class Subscription {
 				}, limit);
 			};
 			const off = client.onNotification((m: RpcMessage) => {
+				if (this.stopped || ended) return;
 				if (!m.method?.startsWith("notifications/events/")) return;
 				if (String(m.params?._meta?.[SUBSCRIPTION_ID]) !== String(call.id)) return;
 				arm();
 				const p = m.params ?? {};
-				switch (m.method) {
+				try { switch (m.method) {
 					case "notifications/events/active":
 						if (typeof p.heartbeatMs === "number") this.heartbeatMs = p.heartbeatMs;
-						if (p.truncated) this.gap = true;
-						this.state.setCursor(this.key, p.cursor);
+						this.handle([], p.cursor, !!p.truncated);
 						this.setStatus("active", "");
 						arm();
 						break;
 					case "notifications/events/heartbeat":
-						this.state.setCursor(this.key, p.cursor);
+						this.handle([], p.cursor);
 						break;
 					case "notifications/events/event":
-						this.handle([p]);
-						this.state.setCursor(this.key, p.cursor);
+						this.handle([p], p.cursor);
 						break;
 					case "notifications/events/error":
 						this.log(`[${this.label}] server error: ${p.error?.message ?? "unknown"}`);
@@ -386,6 +405,9 @@ export class Subscription {
 							finish(new TerminalError(`terminated by server: ${p.error?.message ?? "no reason"} (${p.error?.code})`));
 						}
 						break;
+				} } catch (err) {
+					client.cancel(call.id, "outbox write failed; replay from saved cursor");
+					finish(err instanceof Error ? err : new Error(String(err)));
 				}
 			});
 			this.cancelCurrent = () => {
@@ -401,6 +423,7 @@ export class Subscription {
 	}
 
 	private sleep(ms: number): Promise<void> {
+		if (this.stopped) return Promise.resolve();
 		return new Promise((resolve) => {
 			const t = setTimeout(done, ms);
 			function done() {

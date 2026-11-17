@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # The tests run TypeScript directly, which needs Node 22.18 or later.
+        # Pi and the outbox require Node 22.19+ (TypeScript + built-in SQLite).
         node: ["22", "24"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,5 +26,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: delivery model and real-code counterexample replays
+        if: matrix.node == '24'
+        run: npm run verify
       - name: package contents
         run: npm pack --dry-run

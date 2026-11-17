@@ -1,9 +1,10 @@
 {
   "name": "@pratikgajjar/pi-mcp-events",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "pi extension: MCP Events (SEP-3415) for the MCP servers in pi's mcp.json. An event wakes the pi session.",
   "type": "module",
   "license": "MIT",
+  "engines": { "node": ">=22.19.0" },
   "author": "pratikgajjar",
   "repository": {
     "type": "git",
@@ -32,6 +33,8 @@
   },
   "files": [
     "src",
+    "docs",
+    "assets",
     "CHANGELOG.md"
   ],
   "publishConfig": {
@@ -39,7 +42,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "verify": "node verification/check.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
