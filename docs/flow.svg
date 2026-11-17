@@ -42,21 +42,21 @@
 <!-- files -->
 <path d="M490,190 L490,232" fill="none" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4 4"/>
 <rect x="335" y="232" width="310" height="66" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
-<text x="351" y="262" fill="#e6edf3" class="m" font-size="12">~/.pi/agent/mcp-events.json</text>
-<text x="351" y="280" fill="#8b949e" class="m" font-size="11">subscriptions for every session</text>
-<text x="351" y="296" fill="#8b949e" class="m" font-size="11">+ mcp-events-state.json: cursors</text>
+<text x="351" y="257" fill="#e6edf3" class="m" font-size="12">~/.pi/agent/mcp-events.json</text>
+<text x="351" y="275" fill="#8b949e" class="m" font-size="11">subscriptions for every session</text>
+<text x="351" y="291" fill="#8b949e" class="m" font-size="11">+ mcp-events-state.json: cursors</text>
 
 <path d="M139,190 L139,232" fill="none" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4 4"/>
 <rect x="24" y="232" width="230" height="66" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
-<text x="40" y="262" fill="#e6edf3" class="m" font-size="12">~/.pi/agent/mcp.json</text>
-<text x="40" y="280" fill="#8b949e" class="m" font-size="11">pi's own server config,</text>
-<text x="40" y="296" fill="#8b949e" class="m" font-size="11">no adapter, no fork</text>
+<text x="40" y="257" fill="#e6edf3" class="m" font-size="12">~/.pi/agent/mcp.json</text>
+<text x="40" y="275" fill="#8b949e" class="m" font-size="11">pi's own server config,</text>
+<text x="40" y="291" fill="#8b949e" class="m" font-size="11">no adapter, no fork</text>
 
 <path d="M821,190 L821,232" fill="none" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4 4"/>
 <rect x="706" y="232" width="230" height="66" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
-<text x="722" y="262" fill="#e6edf3" class="m" font-size="12">tools for the agent</text>
-<text x="722" y="280" fill="#8b949e" class="m" font-size="11">mcp_events_list</text>
-<text x="722" y="296" fill="#8b949e" class="m" font-size="11">mcp_events_(un)subscribe</text>
+<text x="722" y="257" fill="#e6edf3" class="m" font-size="12">tools for the agent</text>
+<text x="722" y="275" fill="#8b949e" class="m" font-size="11">mcp_events_list</text>
+<text x="722" y="291" fill="#8b949e" class="m" font-size="11">mcp_events_(un)subscribe</text>
 
 <!-- moving event -->
 <circle class="dot" r="5" fill="#d2a8ff">
