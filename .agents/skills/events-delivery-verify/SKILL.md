@@ -13,7 +13,7 @@ Read `docs/durability.md` and `verification/README.md` first. They define the co
 
 ## Coverage and sync record
 
-Last confirmed source sync commit: `b832ac3832fbbed34c2bedd2b36df84a85bc5b2b`.
+Last confirmed source sync commit: `953e0072624f1f3e1e92b5443419c72e08324d37`.
 
 - `src/state.ts`: `StateStore.accept/change/flush/acknowledge`, owner/quota locks (`tryLock`, `quota`, constructor, `close`), `classify`, `admit` slot sweep and eviction, `cleanStaleLocks`, committed versus staged cursors, pending retention and bounds.
 - `src/receipt.ts`: `persistedReceipts`, exact session/receipt/content match, complete JSONL lines, file and directory sync before cleanup.
