@@ -32,7 +32,7 @@ Or list subscriptions for every session in `~/.pi/agent/mcp-events.json`:
 
 - **Spec:** [SEP-3415](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415), accepted commit `4165cc2`. Push and poll.
 - **Safe input:** event data reaches the model as untrusted data, never as your instruction.
-- **No loss:** cursors persist, so events sent while pi is closed arrive at the next start, once.
+- **Replay:** saved cursors let servers replay retained events. Delivery is not exactly-once.
 - **Not supported:** webhooks (a laptop has no public URL) and OAuth servers.
 
 ## Related projects
