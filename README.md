@@ -37,9 +37,9 @@ Or list subscriptions for every session in `~/.pi/agent/mcp-events.json`:
 
 ## Related projects
 
-[@sanity-labs/pi-mcp-events](https://github.com/sanity-labs/pi-mcp-events) ·
-[@realmikekelly/pi-mcp-events](https://github.com/mikekelly/pi-mcp-events) ·
-[richardanaya/pi-mcp-extensions](https://github.com/richardanaya/pi-mcp-extensions)
+- [@sanity-labs/pi-mcp-events](https://github.com/sanity-labs/pi-mcp-events): adds webhooks, but needs Node 24, a build step and a config per project. Ours runs from source and its subscriptions follow you to every project.
+- [@realmikekelly/pi-mcp-events](https://github.com/mikekelly/pi-mcp-events): works only with a forked `pi-mcp-adapter`. Ours uses pi's built-in MCP.
+- [richardanaya/pi-mcp-extensions](https://github.com/richardanaya/pi-mcp-extensions): events are one part of a larger set (skills, tasks, apps). Ours does events only.
 
 ## License
 
